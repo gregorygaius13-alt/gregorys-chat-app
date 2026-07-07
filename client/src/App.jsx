@@ -150,6 +150,19 @@ function ChatApp({ session, onLogout }) {
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [typingUser, setTypingUser] = useState(null);
   const [readReceipts, setReadReceipts] = useState({}); // { [roomId]: { [username]: lastReadMessageId } }
+  const [showMembers, setShowMembers] = useState(false);
+  const [members, setMembers] = useState([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+
+  async function openMembers() {
+    setShowMembers(true);
+    setLoadingMembers(true);
+    try {
+      const list = await api.getUsers();
+      setMembers(list);
+    } catch {}
+    setLoadingMembers(false);
+  }
 
   const socketRef = useRef(null);
   const scrollRef = useRef(null);
@@ -245,6 +258,12 @@ function ChatApp({ session, onLogout }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  const [uploading, setUploading] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+
   const sendMessage = useCallback(
     (e) => {
       e.preventDefault();
@@ -255,6 +274,53 @@ function ChatApp({ session, onLogout }) {
     },
     [draft, activeRoom]
   );
+
+  async function handlePickPhoto(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !activeRoom) return;
+    setUploading(true);
+    try {
+      const { url, attachmentType } = await api.uploadFile(file);
+      socketRef.current?.emit("send_message", { roomId: activeRoom.id, text: "", attachmentUrl: url, attachmentType });
+    } catch (err) {
+      alert(err.message);
+    }
+    setUploading(false);
+  }
+
+  async function toggleVoiceRecording() {
+    if (!activeRoom) return;
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      setRecording(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const file = new File([blob], "voice-note.webm", { type: "audio/webm" });
+        setUploading(true);
+        try {
+          const { url } = await api.uploadFile(file);
+          socketRef.current?.emit("send_message", { roomId: activeRoom.id, text: "", attachmentUrl: url, attachmentType: "audio" });
+        } catch (err) {
+          alert(err.message);
+        }
+        setUploading(false);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch {
+      alert("Couldn't access your microphone. Check your browser's permission settings.");
+    }
+  }
 
   const lastTypingEmitRef = useRef(0);
   function handleDraftChange(e) {
@@ -318,7 +384,10 @@ function ChatApp({ session, onLogout }) {
               </div>
             )}
           </div>
-          <button onClick={onLogout} style={styles.logoutBtn}>Log out</button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={openMembers} style={styles.membersBtn}>Members</button>
+            <button onClick={onLogout} style={styles.logoutBtn}>Log out</button>
+          </div>
         </div>
 
         <div style={styles.roomListWrap}>
@@ -394,6 +463,17 @@ function ChatApp({ session, onLogout }) {
                             borderTopLeftRadius: item.username === username ? 16 : 4,
                           }}
                         >
+                          {item.attachment_type === "image" && (
+                            <img
+                              src={item.attachment_url}
+                              alt="shared"
+                              style={styles.attachmentImage}
+                              onClick={() => window.open(item.attachment_url, "_blank")}
+                            />
+                          )}
+                          {item.attachment_type === "audio" && (
+                            <audio controls src={item.attachment_url} style={styles.attachmentAudio} />
+                          )}
                           {item.text}
                           <span
                             style={{
@@ -415,8 +495,34 @@ function ChatApp({ session, onLogout }) {
             </div>
 
             {typingUser && <div style={styles.typingIndicator}>{typingUser} is typing…</div>}
+            {uploading && <div style={styles.typingIndicator}>Uploading…</div>}
 
             <form onSubmit={sendMessage} style={styles.inputBar}>
+              <input
+                type="file"
+                accept="image/*"
+                ref={fileInputRef}
+                onChange={handlePickPhoto}
+                style={{ display: "none" }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                style={styles.iconBtn}
+                disabled={uploading}
+                title="Attach a photo"
+              >
+                📎
+              </button>
+              <button
+                type="button"
+                onClick={toggleVoiceRecording}
+                style={{ ...styles.iconBtn, background: recording ? COLORS.roseDark : "transparent", color: recording ? "#fff" : COLORS.charcoal }}
+                disabled={uploading}
+                title={recording ? "Stop recording" : "Record a voice note"}
+              >
+                {recording ? "■" : "🎤"}
+              </button>
               <input
                 value={draft}
                 onChange={handleDraftChange}
@@ -433,6 +539,41 @@ function ChatApp({ session, onLogout }) {
           <div style={styles.emptyState}>Pick a room to start chatting.</div>
         )}
       </div>
+
+      {showMembers && (
+        <div style={styles.modalOverlay} onClick={() => setShowMembers(false)}>
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalTitle}>Who's signed up</div>
+              <button onClick={() => setShowMembers(false)} style={styles.modalClose}>✕</button>
+            </div>
+            {loadingMembers ? (
+              <div style={styles.emptyState}>Loading…</div>
+            ) : members.length === 0 ? (
+              <div style={styles.emptyState}>No members yet.</div>
+            ) : (
+              <div style={styles.membersList}>
+                {members.map((m) => (
+                  <div key={m.username} style={styles.memberRow}>
+                    <div style={{ ...styles.msgAvatar, background: hashColor(m.username) }}>
+                      {initials(m.username)}
+                    </div>
+                    <div>
+                      <div style={styles.memberName}>
+                        {m.username}
+                        {onlineUsers.includes(m.username) && <span style={styles.onlineDotInline} />}
+                      </div>
+                      <div style={styles.memberJoined}>
+                        Joined {new Date(m.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <style>{`
         @media (min-width: 760px) {
@@ -489,6 +630,17 @@ const styles = {
   sidebarBrand: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 19, color: COLORS.paper },
   sidebarUser: { fontSize: 12, color: "rgba(251,247,241,0.55)", marginTop: 4 },
   logoutBtn: { background: "transparent", border: `1px solid rgba(251,247,241,0.3)`, color: "rgba(251,247,241,0.8)", borderRadius: 8, fontSize: 11.5, padding: "5px 9px", cursor: "pointer" },
+  membersBtn: { background: "transparent", border: `1px solid rgba(251,247,241,0.3)`, color: "rgba(251,247,241,0.8)", borderRadius: 8, fontSize: 11.5, padding: "5px 9px", cursor: "pointer" },
+  modalOverlay: { position: "fixed", inset: 0, background: "rgba(27,42,47,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 },
+  modalCard: { background: COLORS.paper, borderRadius: 18, width: "100%", maxWidth: 380, maxHeight: "70vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" },
+  modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px", borderBottom: `1px solid ${COLORS.mist}` },
+  modalTitle: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 17, color: COLORS.charcoal },
+  modalClose: { border: "none", background: "transparent", fontSize: 16, cursor: "pointer", color: "#9a9a90" },
+  membersList: { overflowY: "auto", padding: "10px 8px" },
+  memberRow: { display: "flex", alignItems: "center", gap: 12, padding: "10px 10px", borderRadius: 12 },
+  memberName: { fontSize: 14.5, fontWeight: 600, color: COLORS.charcoal, display: "flex", alignItems: "center", gap: 6 },
+  memberJoined: { fontSize: 12, color: "#9a9a90", marginTop: 2 },
+  onlineDotInline: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
   onlineBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(251,247,241,0.65)", marginTop: 6 },
   onlineDot: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
   typingIndicator: { padding: "4px 20px", fontSize: 12, color: "#9a9a90", fontStyle: "italic" },
@@ -517,5 +669,8 @@ const styles = {
   inputBar: { display: "flex", gap: 10, padding: "14px 18px", borderTop: `1px solid ${COLORS.mist}`, background: "#fff" },
   textInput: { flex: 1, padding: "12px 16px", borderRadius: 24, border: `1.5px solid ${COLORS.mist}`, fontSize: 14.5, outline: "none", fontFamily: "'Inter', sans-serif" },
   sendBtn: { width: 44, height: 44, borderRadius: "50%", border: "none", background: COLORS.rose, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, fontSize: 16 },
+  iconBtn: { width: 40, height: 40, borderRadius: "50%", border: `1.5px solid ${COLORS.mist}`, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, fontSize: 16 },
+  attachmentImage: { display: "block", maxWidth: 220, maxHeight: 220, borderRadius: 12, marginBottom: 6, cursor: "pointer", objectFit: "cover" },
+  attachmentAudio: { display: "block", marginBottom: 6, maxWidth: 240 },
   errBanner: { textAlign: "center", fontSize: 12, color: COLORS.roseDark, padding: "6px 0", background: COLORS.cream },
 };

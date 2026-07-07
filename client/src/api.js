@@ -40,5 +40,19 @@ export const api = {
   createRoom: (name) => request('/api/rooms', { method: 'POST', body: JSON.stringify({ name }) }),
   getMessages: (roomId) => request(`/api/rooms/${roomId}/messages`),
   getPushPublicKey: () => request('/api/push/public-key'),
-  subscribePush: (subscription) => request('/api/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) })
+  subscribePush: (subscription) => request('/api/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),
+  getUsers: () => request('/api/users'),
+  uploadFile: async (file) => {
+    const token = getToken();
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed.');
+    return data; // { url, attachmentType }
+  }
 };
