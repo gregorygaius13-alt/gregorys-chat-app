@@ -4,6 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Server } from 'socket.io';
 import webpush from 'web-push';
+import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
 import pool, { initDb } from './db.js';
 import { hashPassword, checkPassword, signToken, verifyToken, requireAuth } from './auth.js';
 
@@ -13,6 +15,41 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.json());
+
+// ---------- Photo / voice-note uploads (Cloudinary) ----------
+const uploadsEnabled = Boolean(
+  process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET
+);
+if (uploadsEnabled) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
+} else {
+  console.warn('Cloudinary env vars not set — photo/voice sharing is disabled until configured.');
+}
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+
+app.post('/api/upload', requireAuth, upload.single('file'), async (req, res) => {
+  if (!uploadsEnabled) return res.status(503).json({ error: 'File sharing is not configured yet.' });
+  if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+  try {
+    const isAudio = req.file.mimetype.startsWith('audio/');
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { resource_type: isAudio ? 'video' : 'image', folder: 'gregorys-chat' }, // Cloudinary stores audio under 'video' resource type
+        (err, result) => (err ? reject(err) : resolve(result))
+      );
+      stream.end(req.file.buffer);
+    });
+    res.json({ url: result.secure_url, attachmentType: isAudio ? 'audio' : 'image' });
+  } catch (e) {
+    console.error('Upload error', e);
+    res.status(500).json({ error: 'Upload failed. Please try again.' });
+  }
+});
 
 // ---------- Push notifications (VAPID key pair, no external account needed) ----------
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
@@ -85,6 +122,14 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// ---------- Members ----------
+app.get('/api/users', requireAuth, async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT username, created_at FROM users ORDER BY created_at ASC'
+  );
+  res.json(rows);
+});
+
 // ---------- Rooms ----------
 app.get('/api/rooms', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT id, name FROM rooms ORDER BY id ASC');
@@ -110,7 +155,7 @@ app.post('/api/rooms', requireAuth, async (req, res) => {
 
 app.get('/api/rooms/:id/messages', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT id, username, text, created_at FROM messages WHERE room_id = $1 ORDER BY id ASC LIMIT 200',
+    'SELECT id, username, text, attachment_url, attachment_type, created_at FROM messages WHERE room_id = $1 ORDER BY id ASC LIMIT 200',
     [req.params.id]
   );
   res.json(rows);
@@ -160,12 +205,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('send_message', async ({ roomId, text }) => {
-    if (!text || !text.trim() || !roomId) return;
+  socket.on('send_message', async ({ roomId, text, attachmentUrl, attachmentType }) => {
+    const cleanText = (text || '').trim();
+    if (!roomId || (!cleanText && !attachmentUrl)) return;
     try {
       const { rows } = await pool.query(
-        'INSERT INTO messages (room_id, user_id, username, text) VALUES ($1, $2, $3, $4) RETURNING id, username, text, created_at',
-        [roomId, socket.user.id, socket.user.username, text.trim()]
+        'INSERT INTO messages (room_id, user_id, username, text, attachment_url, attachment_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, text, attachment_url, attachment_type, created_at',
+        [roomId, socket.user.id, socket.user.username, cleanText || null, attachmentUrl || null, attachmentType || null]
       );
       const message = rows[0];
       io.to(`room:${roomId}`).emit('new_message', { roomId, message });
@@ -184,7 +230,7 @@ io.on('connection', (socket) => {
             if (activeUserIds.has(sub.user_id)) continue; // already looking at this room
             const payload = JSON.stringify({
               title: roomName,
-              body: `${socket.user.username}: ${text.trim()}`,
+              body: `${socket.user.username}: ${cleanText || (attachmentType === 'audio' ? '🎤 Voice note' : '📷 Photo')}`,
               roomId,
             });
             webpush

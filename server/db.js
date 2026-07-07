@@ -50,6 +50,10 @@ export async function initDb() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
+  // Photo / voice-note attachments (added later — safe to run on an existing database)
+  await pool.query(`ALTER TABLE messages ALTER COLUMN text DROP NOT NULL;`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_type TEXT;`);
   const { rows } = await pool.query('SELECT COUNT(*) FROM rooms');
   if (parseInt(rows[0].count, 10) === 0) {
     await pool.query("INSERT INTO rooms (name) VALUES ('Family Group')");
