@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
-import { api, getToken, getUsername, setSession, clearSession } from "./api";
+import { api, getToken, getUsername, getIsAdmin, setSession, clearSession } from "./api";
 
 const COLORS = {
   ink: "#1B2A2F",
@@ -49,7 +49,7 @@ export default function App() {
   const [session, setSess] = useState(() => {
     const token = getToken();
     const username = getUsername();
-    return token && username ? { token, username } : null;
+    return token && username ? { token, username, isAdmin: getIsAdmin() } : null;
   });
 
   if (!session) return <AuthScreen onAuthed={(s) => setSess(s)} />;
@@ -72,8 +72,8 @@ function AuthScreen({ onAuthed }) {
     try {
       const fn = mode === "login" ? api.login : api.signup;
       const data = await fn(username.trim(), password);
-      setSession(data.token, data.username);
-      onAuthed({ token: data.token, username: data.username });
+      setSession(data.token, data.username, data.isAdmin);
+      onAuthed({ token: data.token, username: data.username, isAdmin: data.isAdmin });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -137,7 +137,7 @@ function AuthScreen({ onAuthed }) {
 
 // ============================ CHAT APP ============================
 function ChatApp({ session, onLogout }) {
-  const { token, username } = session;
+  const { token, username, isAdmin } = session;
   const [rooms, setRooms] = useState([]);
   const [activeRoom, setActiveRoom] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -153,6 +153,28 @@ function ChatApp({ session, onLogout }) {
   const [showMembers, setShowMembers] = useState(false);
   const [members, setMembers] = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
+
+  async function handleResetPassword(targetUsername) {
+    const newPassword = window.prompt(`New password for ${targetUsername} (at least 6 characters):`);
+    if (!newPassword) return;
+    try {
+      await api.resetPassword(targetUsername, newPassword);
+      alert(`Password reset for ${targetUsername}. Tell them their new password directly.`);
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function handleRecoverAdmin() {
+    const secret = window.prompt("Enter the recovery secret (set as ADMIN_BOOTSTRAP_SECRET on Render):");
+    if (!secret) return;
+    try {
+      await api.bootstrapAdmin(secret);
+      alert("You're now an admin! Log out and log back in for it to take effect.");
+    } catch (err) {
+      alert(err.message);
+    }
+  }
 
   async function openMembers() {
     setShowMembers(true);
@@ -558,17 +580,30 @@ function ChatApp({ session, onLogout }) {
                     <div style={{ ...styles.msgAvatar, background: hashColor(m.username) }}>
                       {initials(m.username)}
                     </div>
-                    <div>
+                    <div style={{ flex: 1 }}>
                       <div style={styles.memberName}>
                         {m.username}
                         {onlineUsers.includes(m.username) && <span style={styles.onlineDotInline} />}
+                        {m.is_admin && <span style={styles.adminTag}>admin</span>}
                       </div>
                       <div style={styles.memberJoined}>
                         Joined {new Date(m.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
                       </div>
                     </div>
+                    {isAdmin && (
+                      <button onClick={() => handleResetPassword(m.username)} style={styles.resetBtn}>
+                        Reset password
+                      </button>
+                    )}
                   </div>
                 ))}
+              </div>
+            )}
+            {!isAdmin && (
+              <div style={styles.recoverLinkWrap}>
+                <button onClick={handleRecoverAdmin} style={styles.recoverLink}>
+                  Locked out of the original admin account? Recover access
+                </button>
               </div>
             )}
           </div>
@@ -641,6 +676,10 @@ const styles = {
   memberName: { fontSize: 14.5, fontWeight: 600, color: COLORS.charcoal, display: "flex", alignItems: "center", gap: 6 },
   memberJoined: { fontSize: 12, color: "#9a9a90", marginTop: 2 },
   onlineDotInline: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
+  adminTag: { fontSize: 10, fontWeight: 700, color: COLORS.roseDark, background: "rgba(224,120,95,0.12)", padding: "2px 6px", borderRadius: 6, textTransform: "uppercase", letterSpacing: 0.3 },
+  resetBtn: { fontSize: 11.5, padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.mist}`, background: "#fff", color: COLORS.charcoal, cursor: "pointer", whiteSpace: "nowrap" },
+  recoverLinkWrap: { padding: "10px 18px 16px", borderTop: `1px solid ${COLORS.mist}` },
+  recoverLink: { border: "none", background: "transparent", color: "#9a9a90", fontSize: 11.5, cursor: "pointer", textDecoration: "underline", padding: 0 },
   onlineBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(251,247,241,0.65)", marginTop: 6 },
   onlineDot: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
   typingIndicator: { padding: "4px 20px", fontSize: 12, color: "#9a9a90", fontStyle: "italic" },

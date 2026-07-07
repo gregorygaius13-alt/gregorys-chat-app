@@ -1,5 +1,6 @@
 const TOKEN_KEY = 'kt_token';
 const NAME_KEY = 'kt_username';
+const ADMIN_KEY = 'kt_is_admin';
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -7,13 +8,18 @@ export function getToken() {
 export function getUsername() {
   return localStorage.getItem(NAME_KEY);
 }
-export function setSession(token, username) {
+export function getIsAdmin() {
+  return localStorage.getItem(ADMIN_KEY) === 'true';
+}
+export function setSession(token, username, isAdmin) {
   localStorage.setItem(TOKEN_KEY, token);
   localStorage.setItem(NAME_KEY, username);
+  localStorage.setItem(ADMIN_KEY, isAdmin ? 'true' : 'false');
 }
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(NAME_KEY);
+  localStorage.removeItem(ADMIN_KEY);
 }
 
 async function request(path, options = {}) {
@@ -42,6 +48,9 @@ export const api = {
   getPushPublicKey: () => request('/api/push/public-key'),
   subscribePush: (subscription) => request('/api/push/subscribe', { method: 'POST', body: JSON.stringify(subscription) }),
   getUsers: () => request('/api/users'),
+  resetPassword: (username, newPassword) =>
+    request(`/api/users/${encodeURIComponent(username)}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
+  bootstrapAdmin: (secret) => request('/api/admin/bootstrap', { method: 'POST', body: JSON.stringify({ secret }) }),
   uploadFile: async (file) => {
     const token = getToken();
     const formData = new FormData();
