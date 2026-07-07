@@ -24,6 +24,28 @@ VAPID_PRIVATE_KEY=pZzLsCrSpxXr778Fx4gWt-oHoVcYmfUOk30IqrFKKz0
 2. Treat the private key like a password — don't share it publicly (e.g. don't post it in a public GitHub repo's README or commit history). It's fine to paste only into Render's environment variable fields.
 3. If you skip this, the app still works fine — it just won't send push notifications until you add the keys later (as environment variables in the Render dashboard, under your service's **Environment** tab).
 
+## New: photo and voice-note sharing
+
+- Tap **📎** next to the message box to send a photo.
+- Tap **🎤** to record a voice note, tap **■** to stop and send it.
+- Files are stored on **Cloudinary** (a free file-hosting service), since Render's free tier doesn't keep uploaded files permanently.
+
+### One extra setup step for photo/voice sharing: Cloudinary keys
+
+Your Cloudinary account details (already created — keep them private, don't post them publicly):
+
+```
+CLOUDINARY_CLOUD_NAME=z4ze0clq
+CLOUDINARY_API_KEY=351484856433661
+CLOUDINARY_API_SECRET=R1za9pTJJff-6CfNNYQEmaLFngI
+```
+
+1. On your Render dashboard, open your **family-chat** web service → **Environment** tab.
+2. Add three environment variables using the exact names and values above.
+3. Render will automatically redeploy after saving. Once it's back up, photo and voice-note sharing will work.
+4. Skip this and the app still works fine — attaching a photo or voice note will just show an error until these are added.
+5. Cloudinary's free tier includes 25GB of storage and bandwidth per month — more than enough for a family chat.
+
 ## Deploy it for free on Render
 
 1. **Put this code on GitHub.**
