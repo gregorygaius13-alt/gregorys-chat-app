@@ -10,7 +10,7 @@ export async function checkPassword(pw, hash) {
   return bcrypt.compare(pw, hash);
 }
 export function signToken(user) {
-  return jwt.sign({ id: user.id, username: user.username }, SECRET, { expiresIn: '30d' });
+  return jwt.sign({ id: user.id, username: user.username, isAdmin: Boolean(user.is_admin) }, SECRET, { expiresIn: '30d' });
 }
 export function verifyToken(token) {
   try {
@@ -25,5 +25,9 @@ export function requireAuth(req, res, next) {
   const payload = token && verifyToken(token);
   if (!payload) return res.status(401).json({ error: 'Not authenticated' });
   req.user = payload;
+  next();
+}
+export function requireAdmin(req, res, next) {
+  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Only an admin can do that.' });
   next();
 }

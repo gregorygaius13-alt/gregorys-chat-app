@@ -7,7 +7,7 @@ import webpush from 'web-push';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import pool, { initDb } from './db.js';
-import { hashPassword, checkPassword, signToken, verifyToken, requireAuth } from './auth.js';
+import { hashPassword, checkPassword, signToken, verifyToken, requireAuth, requireAdmin } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -95,12 +95,14 @@ app.post('/api/auth/signup', async (req, res) => {
     const existing = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
     if (existing.rows.length) return res.status(409).json({ error: 'That username is already taken.' });
     const hash = await hashPassword(password);
+    const { rows: countRows } = await pool.query('SELECT COUNT(*) FROM users');
+    const isFirstUser = parseInt(countRows[0].count, 10) === 0;
     const { rows } = await pool.query(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username',
-      [username, hash]
+      'INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, $3) RETURNING id, username, is_admin',
+      [username, hash, isFirstUser]
     );
     const token = signToken(rows[0]);
-    res.json({ token, username: rows[0].username });
+    res.json({ token, username: rows[0].username, isAdmin: rows[0].is_admin });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Something went wrong creating your account.' });
@@ -115,7 +117,7 @@ app.post('/api/auth/login', async (req, res) => {
     const ok = await checkPassword(password, rows[0].password_hash);
     if (!ok) return res.status(401).json({ error: 'Incorrect username or password.' });
     const token = signToken(rows[0]);
-    res.json({ token, username: rows[0].username });
+    res.json({ token, username: rows[0].username, isAdmin: rows[0].is_admin });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Something went wrong signing you in.' });
@@ -125,9 +127,45 @@ app.post('/api/auth/login', async (req, res) => {
 // ---------- Members ----------
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT username, created_at FROM users ORDER BY created_at ASC'
+    'SELECT username, created_at, is_admin FROM users ORDER BY created_at ASC'
   );
   res.json(rows);
+});
+
+app.post('/api/users/:username/reset-password', requireAuth, requireAdmin, async (req, res) => {
+  const { newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+  }
+  try {
+    const hash = await hashPassword(newPassword);
+    const { rowCount } = await pool.query(
+      'UPDATE users SET password_hash = $1 WHERE username = $2',
+      [hash, req.params.username]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'No such user.' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not reset password.' });
+  }
+});
+
+// One-time recovery: promote your currently logged-in account to admin using a
+// secret only you know (set ADMIN_BOOTSTRAP_SECRET in Render's Environment tab —
+// remove it again once you've used it).
+app.post('/api/admin/bootstrap', requireAuth, async (req, res) => {
+  const { secret } = req.body || {};
+  const expected = process.env.ADMIN_BOOTSTRAP_SECRET;
+  if (!expected) return res.status(503).json({ error: 'No recovery secret is set up.' });
+  if (secret !== expected) return res.status(403).json({ error: 'Incorrect secret.' });
+  try {
+    await pool.query('UPDATE users SET is_admin = true WHERE username = $1', [req.user.username]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not update admin status.' });
+  }
 });
 
 // ---------- Rooms ----------

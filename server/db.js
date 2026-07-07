@@ -54,6 +54,13 @@ export async function initDb() {
   await pool.query(`ALTER TABLE messages ALTER COLUMN text DROP NOT NULL;`);
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;`);
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_type TEXT;`);
+  // Admin role, used to let one trusted person reset a family member's password
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT false;`);
+  await pool.query(`
+    UPDATE users SET is_admin = true
+    WHERE id = (SELECT MIN(id) FROM users)
+    AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = true);
+  `);
   const { rows } = await pool.query('SELECT COUNT(*) FROM rooms');
   if (parseInt(rows[0].count, 10) === 0) {
     await pool.query("INSERT INTO rooms (name) VALUES ('Family Group')");
