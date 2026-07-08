@@ -61,6 +61,17 @@ export async function initDb() {
     WHERE id = (SELECT MIN(id) FROM users)
     AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = true);
   `);
+  // Profile pictures
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;`);
+  // Private 1-to-1 chats — a room with rows here is restricted to just those members;
+  // a room with no rows here is a normal, everyone-can-see-it group room.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS room_members (
+      room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (room_id, user_id)
+    );
+  `);
   const { rows } = await pool.query('SELECT COUNT(*) FROM rooms');
   if (parseInt(rows[0].count, 10) === 0) {
     await pool.query("INSERT INTO rooms (name) VALUES ('Family Group')");

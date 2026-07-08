@@ -127,9 +127,21 @@ app.post('/api/auth/login', async (req, res) => {
 // ---------- Members ----------
 app.get('/api/users', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT username, created_at, is_admin FROM users ORDER BY created_at ASC'
+    'SELECT username, created_at, is_admin, avatar_url FROM users ORDER BY created_at ASC'
   );
   res.json(rows);
+});
+
+app.post('/api/users/me/avatar', requireAuth, async (req, res) => {
+  const { avatarUrl } = req.body || {};
+  if (!avatarUrl) return res.status(400).json({ error: 'No image provided.' });
+  try {
+    await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, req.user.id]);
+    res.json({ success: true, avatarUrl });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not update your profile picture.' });
+  }
 });
 
 app.post('/api/users/:username/reset-password', requireAuth, requireAdmin, async (req, res) => {
@@ -170,7 +182,23 @@ app.post('/api/admin/bootstrap', requireAuth, async (req, res) => {
 
 // ---------- Rooms ----------
 app.get('/api/rooms', requireAuth, async (req, res) => {
-  const { rows } = await pool.query('SELECT id, name FROM rooms ORDER BY id ASC');
+  // A room shows up if it's a public group room (no room_members rows at all)
+  // OR the current user is specifically a member of it (private DMs).
+  const { rows } = await pool.query(
+    `SELECT r.id, r.name, dm.other_username AS dm_with
+     FROM rooms r
+     LEFT JOIN (
+       SELECT rm1.room_id, u.username AS other_username
+       FROM room_members rm1
+       JOIN room_members rm2 ON rm1.room_id = rm2.room_id AND rm2.user_id != rm1.user_id
+       JOIN users u ON u.id = rm2.user_id
+       WHERE rm1.user_id = $1
+     ) dm ON dm.room_id = r.id
+     WHERE NOT EXISTS (SELECT 1 FROM room_members WHERE room_id = r.id)
+        OR EXISTS (SELECT 1 FROM room_members WHERE room_id = r.id AND user_id = $1)
+     ORDER BY r.id ASC`,
+    [req.user.id]
+  );
   res.json(rows);
 });
 
@@ -191,7 +219,51 @@ app.post('/api/rooms', requireAuth, async (req, res) => {
   }
 });
 
+// Find-or-create a private 1-to-1 chat with another user
+app.post('/api/dm/:username', requireAuth, async (req, res) => {
+  const targetUsername = req.params.username;
+  if (targetUsername === req.user.username) {
+    return res.status(400).json({ error: "You can't message yourself." });
+  }
+  try {
+    const { rows: targetRows } = await pool.query('SELECT id, username FROM users WHERE username = $1', [targetUsername]);
+    if (!targetRows.length) return res.status(404).json({ error: 'No such user.' });
+    const targetId = targetRows[0].id;
+    const [idA, idB] = [req.user.id, targetId].sort((a, b) => a - b);
+    const roomName = `dm-${idA}-${idB}`;
+
+    let { rows: existing } = await pool.query('SELECT id, name FROM rooms WHERE name = $1', [roomName]);
+    let room;
+    if (existing.length) {
+      room = existing[0];
+    } else {
+      const { rows: created } = await pool.query('INSERT INTO rooms (name) VALUES ($1) RETURNING id, name', [roomName]);
+      room = created[0];
+      await pool.query(
+        'INSERT INTO room_members (room_id, user_id) VALUES ($1, $2), ($1, $3) ON CONFLICT DO NOTHING',
+        [room.id, req.user.id, targetId]
+      );
+    }
+    res.json({ id: room.id, name: room.name, dm_with: targetUsername });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not start that conversation.' });
+  }
+});
+
+async function userCanAccessRoom(roomId, userId) {
+  const { rows } = await pool.query('SELECT 1 FROM room_members WHERE room_id = $1', [roomId]);
+  if (!rows.length) return true; // public room, no membership restriction
+  const { rows: memberRows } = await pool.query(
+    'SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2',
+    [roomId, userId]
+  );
+  return memberRows.length > 0;
+}
+
 app.get('/api/rooms/:id/messages', requireAuth, async (req, res) => {
+  const allowed = await userCanAccessRoom(req.params.id, req.user.id);
+  if (!allowed) return res.status(403).json({ error: 'You do not have access to this conversation.' });
   const { rows } = await pool.query(
     'SELECT id, username, text, attachment_url, attachment_type, created_at FROM messages WHERE room_id = $1 ORDER BY id ASC LIMIT 200',
     [req.params.id]
@@ -220,7 +292,9 @@ io.on('connection', (socket) => {
   connectedUsers.set(socket.id, { id: socket.user.id, username: socket.user.username });
   broadcastPresence();
 
-  socket.on('join_room', (roomId) => {
+  socket.on('join_room', async (roomId) => {
+    const allowed = await userCanAccessRoom(roomId, socket.user.id);
+    if (!allowed) return;
     socket.join(`room:${roomId}`);
   });
 
@@ -246,6 +320,8 @@ io.on('connection', (socket) => {
   socket.on('send_message', async ({ roomId, text, attachmentUrl, attachmentType }) => {
     const cleanText = (text || '').trim();
     if (!roomId || (!cleanText && !attachmentUrl)) return;
+    const allowed = await userCanAccessRoom(roomId, socket.user.id);
+    if (!allowed) return;
     try {
       const { rows } = await pool.query(
         'INSERT INTO messages (room_id, user_id, username, text, attachment_url, attachment_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, text, attachment_url, attachment_type, created_at',
