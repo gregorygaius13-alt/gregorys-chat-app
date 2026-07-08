@@ -37,14 +37,16 @@ app.post('/api/upload', requireAuth, upload.single('file'), async (req, res) => 
   if (!req.file) return res.status(400).json({ error: 'No file provided.' });
   try {
     const isAudio = req.file.mimetype.startsWith('audio/');
+    const isVideo = req.file.mimetype.startsWith('video/');
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
-        { resource_type: isAudio ? 'video' : 'image', folder: 'gregorys-chat' }, // Cloudinary stores audio under 'video' resource type
+        { resource_type: (isAudio || isVideo) ? 'video' : 'image', folder: 'gregorys-chat' }, // Cloudinary stores audio/video under the 'video' resource type
         (err, result) => (err ? reject(err) : resolve(result))
       );
       stream.end(req.file.buffer);
     });
-    res.json({ url: result.secure_url, attachmentType: isAudio ? 'audio' : 'image' });
+    const attachmentType = isAudio ? 'audio' : isVideo ? 'video' : 'image';
+    res.json({ url: result.secure_url, attachmentType });
   } catch (e) {
     console.error('Upload error', e);
     res.status(500).json({ error: 'Upload failed. Please try again.' });
@@ -179,6 +181,132 @@ app.post('/api/admin/bootstrap', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Could not update admin status.' });
   }
 });
+
+// ---------- Live/Status posts (disappear after 24 hours) ----------
+app.get('/api/posts', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.username, u.avatar_url, p.text, p.media_url, p.media_type, p.created_at, p.expires_at,
+              EXISTS(SELECT 1 FROM post_views v WHERE v.post_id = p.id AND v.user_id = $1) AS viewed_by_me,
+              (SELECT reaction FROM post_reactions WHERE post_id = p.id AND user_id = $1) AS my_reaction,
+              (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = p.id AND reaction = 'like') AS like_count,
+              (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = p.id AND reaction = 'dislike') AS dislike_count,
+              (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = p.id AND reaction = 'hate') AS hate_count
+       FROM posts p
+       JOIN users u ON u.id = p.user_id
+       WHERE p.expires_at > now()
+       ORDER BY p.created_at ASC`,
+      [req.user.id]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not load updates.' });
+  }
+});
+
+app.post('/api/posts', requireAuth, async (req, res) => {
+  const { text, mediaUrl, mediaType } = req.body || {};
+  const cleanText = (text || '').trim();
+  if (!cleanText && !mediaUrl) return res.status(400).json({ error: 'Add some text or a photo first.' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO posts (user_id, username, text, media_url, media_type, expires_at)
+       VALUES ($1, $2, $3, $4, $5, now() + interval '24 hours')
+       RETURNING id, username, text, media_url, media_type, created_at, expires_at`,
+      [req.user.id, req.user.username, cleanText || null, mediaUrl || null, mediaType || null]
+    );
+    const { rows: userRows } = await pool.query('SELECT avatar_url FROM users WHERE id = $1', [req.user.id]);
+    const post = {
+      ...rows[0],
+      avatar_url: userRows[0]?.avatar_url || null,
+      viewed_by_me: true,
+      my_reaction: null,
+      like_count: 0,
+      dislike_count: 0,
+      hate_count: 0,
+    };
+    io.emit('new_post', post);
+    res.json(post);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not share that.' });
+  }
+});
+
+app.post('/api/posts/:id/view', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'INSERT INTO post_views (post_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.params.id, req.user.id]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not update.' });
+  }
+});
+
+const VALID_REACTIONS = ['like', 'dislike', 'hate'];
+
+async function emitReactionCounts(postId) {
+  const { rows } = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = $1 AND reaction = 'like') AS like_count,
+       (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = $1 AND reaction = 'dislike') AS dislike_count,
+       (SELECT COUNT(*)::int FROM post_reactions WHERE post_id = $1 AND reaction = 'hate') AS hate_count`,
+    [postId]
+  );
+  io.emit('post_reaction', { postId: Number(postId), ...rows[0] });
+}
+
+app.post('/api/posts/:id/react', requireAuth, async (req, res) => {
+  const { reaction } = req.body || {};
+  try {
+    if (!reaction) {
+      await pool.query('DELETE FROM post_reactions WHERE post_id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+      await emitReactionCounts(req.params.id);
+      return res.json({ success: true, reaction: null });
+    }
+    if (!VALID_REACTIONS.includes(reaction)) return res.status(400).json({ error: 'Invalid reaction.' });
+    await pool.query(
+      `INSERT INTO post_reactions (post_id, user_id, username, reaction) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (post_id, user_id) DO UPDATE SET reaction = EXCLUDED.reaction, created_at = now()`,
+      [req.params.id, req.user.id, req.user.username, reaction]
+    );
+    await emitReactionCounts(req.params.id);
+    res.json({ success: true, reaction });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not save your reaction.' });
+  }
+});
+
+app.get('/api/posts/:id/viewers', requireAuth, async (req, res) => {
+  try {
+    const postRes = await pool.query('SELECT user_id FROM posts WHERE id = $1', [req.params.id]);
+    if (!postRes.rows.length) return res.status(404).json({ error: 'Not found.' });
+    if (postRes.rows[0].user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Only the person who posted this can see who viewed it.' });
+    }
+    const { rows } = await pool.query(
+      `SELECT u.username, v.viewed_at, pr.reaction FROM post_views v
+       JOIN users u ON u.id = v.user_id
+       LEFT JOIN post_reactions pr ON pr.post_id = v.post_id AND pr.user_id = v.user_id
+       WHERE v.post_id = $1 ORDER BY v.viewed_at ASC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not load viewers.' });
+  }
+});
+
+// Clear out expired posts once an hour so the table doesn't grow forever
+setInterval(() => {
+  pool.query('DELETE FROM posts WHERE expires_at < now()').catch(() => {});
+}, 60 * 60 * 1000);
 
 // ---------- Rooms ----------
 app.get('/api/rooms', requireAuth, async (req, res) => {

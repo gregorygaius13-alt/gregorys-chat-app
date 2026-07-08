@@ -76,6 +76,37 @@ export async function initDb() {
   if (parseInt(rows[0].count, 10) === 0) {
     await pool.query("INSERT INTO rooms (name) VALUES ('Family Group')");
   }
+  // Live/Status posts — temporary updates that disappear after 24 hours
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS posts (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      username TEXT NOT NULL,
+      text TEXT,
+      media_url TEXT,
+      media_type TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      expires_at TIMESTAMPTZ NOT NULL
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS post_views (
+      post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      viewed_at TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (post_id, user_id)
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS post_reactions (
+      post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      username TEXT NOT NULL,
+      reaction TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (post_id, user_id)
+    );
+  `);
 }
 
 export default pool;
