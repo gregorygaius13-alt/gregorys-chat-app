@@ -24,6 +24,28 @@ function hashColor(name) {
 function initials(name) {
   return name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join("");
 }
+function Avatar({ username, avatarUrl, size = 28, fontSize = 11 }) {
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={username}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        width: size, height: size, borderRadius: "50%", background: hashColor(username),
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize, fontWeight: 600, color: "#fff", flexShrink: 0,
+      }}
+    >
+      {initials(username)}
+    </div>
+  );
+}
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
@@ -85,7 +107,7 @@ function AuthScreen({ onAuthed }) {
     <div style={styles.joinWrap}>
       <GlobalStyle />
       <div style={styles.joinCard}>
-        <div style={styles.joinStamp}>💬</div>
+        <div style={styles.joinStamp}><i className="fa-solid fa-comments" style={{ color: "#fff", fontSize: 20 }}></i></div>
         <h1 style={styles.joinTitle}>Gregory's</h1>
         <p style={styles.joinSub}>
           A private space for the people who matter most.
@@ -153,6 +175,42 @@ function ChatApp({ session, onLogout }) {
   const [showMembers, setShowMembers] = useState(false);
   const [members, setMembers] = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [profileUploading, setProfileUploading] = useState(false);
+  const profilePhotoInputRef = useRef(null);
+
+  const avatarMap = Object.fromEntries(members.map((m) => [m.username, m.avatar_url]));
+
+  useEffect(() => {
+    api.getUsers().then(setMembers).catch(() => {});
+  }, []);
+
+  async function handleProfilePhotoChange(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setProfileUploading(true);
+    try {
+      const { url } = await api.uploadFile(file);
+      await api.updateAvatar(url);
+      setMembers((prev) => prev.map((m) => (m.username === username ? { ...m, avatar_url: url } : m)));
+    } catch (err) {
+      alert(err.message);
+    }
+    setProfileUploading(false);
+  }
+
+  async function handleStartDM(targetUsername) {
+    try {
+      const room = await api.startDirectMessage(targetUsername);
+      setRooms((prev) => (prev.some((r) => r.id === room.id) ? prev : [...prev, room]));
+      setActiveRoom(room);
+      setShowMembers(false);
+      setShowMobileList(false);
+    } catch (err) {
+      alert(err.message);
+    }
+  }
 
   async function handleResetPassword(targetUsername) {
     const newPassword = window.prompt(`New password for ${targetUsername} (at least 6 characters):`);
@@ -397,14 +455,19 @@ function ChatApp({ session, onLogout }) {
       <GlobalStyle />
       <div style={{ ...styles.sidebar, display: showMobileList ? "flex" : "none" }} className="fc-sidebar">
         <div style={styles.sidebarHeader}>
-          <div>
-            <div style={styles.sidebarBrand}>Gregory's</div>
-            <div style={styles.sidebarUser}>signed in as {username}</div>
-            {onlineUsers.filter((u) => u !== username).length > 0 && (
-              <div style={styles.onlineBadge}>
-                <span style={styles.onlineDot} /> {onlineUsers.filter((u) => u !== username).join(", ")} online
-              </div>
-            )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button onClick={() => setShowProfile(true)} style={styles.avatarBtn} title="Edit your profile picture">
+              <Avatar username={username} avatarUrl={avatarMap[username]} size={38} fontSize={13} />
+            </button>
+            <div>
+              <div style={styles.sidebarBrand}>Gregory's</div>
+              <div style={styles.sidebarUser}>signed in as {username}</div>
+              {onlineUsers.filter((u) => u !== username).length > 0 && (
+                <div style={styles.onlineBadge}>
+                  <span style={styles.onlineDot} /> {onlineUsers.filter((u) => u !== username).join(", ")} online
+                </div>
+              )}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={openMembers} style={styles.membersBtn}>Members</button>
@@ -419,8 +482,12 @@ function ChatApp({ session, onLogout }) {
               onClick={() => selectRoom(r)}
               style={{ ...styles.roomItem, background: activeRoom?.id === r.id ? COLORS.inkSoft : "transparent" }}
             >
-              <div style={{ ...styles.roomAvatar, background: hashColor(r.name) }}>👨‍👩‍👧</div>
-              <span style={styles.roomName}>{r.name}</span>
+              {r.dm_with ? (
+                <Avatar username={r.dm_with} avatarUrl={avatarMap[r.dm_with]} size={34} fontSize={13} />
+              ) : (
+                <div style={{ ...styles.roomAvatar, background: hashColor(r.name) }}><i className="fa-solid fa-users" style={{ color: "#fff", fontSize: 13 }}></i></div>
+              )}
+              <span style={styles.roomName}>{r.dm_with || r.name}</span>
             </button>
           ))}
         </div>
@@ -436,10 +503,10 @@ function ChatApp({ session, onLogout }) {
                 style={styles.newRoomInput}
                 maxLength={30}
               />
-              <button type="submit" style={styles.newRoomGo}>+</button>
+              <button type="submit" style={styles.newRoomGo}><i className="fa-solid fa-plus"></i></button>
             </form>
           ) : (
-            <button onClick={() => setShowNewRoom(true)} style={styles.newRoomBtn}>+ New room</button>
+            <button onClick={() => setShowNewRoom(true)} style={styles.newRoomBtn}><i className="fa-solid fa-plus"></i>&nbsp; New room</button>
           )}
         </div>
       </div>
@@ -448,9 +515,13 @@ function ChatApp({ session, onLogout }) {
         {activeRoom ? (
           <>
             <div style={styles.chatHeader}>
-              <button className="fc-back" onClick={() => setShowMobileList(true)} style={styles.backBtn}>←</button>
-              <div style={{ ...styles.roomAvatar, background: hashColor(activeRoom.name) }}>👨‍👩‍👧</div>
-              <div style={styles.chatHeaderTitle}>{activeRoom.name}</div>
+              <button className="fc-back" onClick={() => setShowMobileList(true)} style={styles.backBtn}><i className="fa-solid fa-arrow-left"></i></button>
+              {activeRoom.dm_with ? (
+                <Avatar username={activeRoom.dm_with} avatarUrl={avatarMap[activeRoom.dm_with]} size={34} fontSize={13} />
+              ) : (
+                <div style={{ ...styles.roomAvatar, background: hashColor(activeRoom.name) }}><i className="fa-solid fa-users" style={{ color: "#fff", fontSize: 13 }}></i></div>
+              )}
+              <div style={styles.chatHeaderTitle}>{activeRoom.dm_with || activeRoom.name}</div>
             </div>
 
             <div ref={scrollRef} style={styles.messagesWrap}>
@@ -470,9 +541,7 @@ function ChatApp({ session, onLogout }) {
                       style={{ ...styles.bubbleRow, justifyContent: item.username === username ? "flex-end" : "flex-start" }}
                     >
                       {item.username !== username && (
-                        <div style={{ ...styles.msgAvatar, background: hashColor(item.username) }}>
-                          {initials(item.username)}
-                        </div>
+                        <Avatar username={item.username} avatarUrl={avatarMap[item.username]} size={28} fontSize={11} />
                       )}
                       <div>
                         {item.username !== username && <div style={styles.senderLabel}>{item.username}</div>}
@@ -534,7 +603,7 @@ function ChatApp({ session, onLogout }) {
                 disabled={uploading}
                 title="Attach a photo"
               >
-                📎
+                <i className="fa-solid fa-paperclip"></i>
               </button>
               <button
                 type="button"
@@ -543,7 +612,7 @@ function ChatApp({ session, onLogout }) {
                 disabled={uploading}
                 title={recording ? "Stop recording" : "Record a voice note"}
               >
-                {recording ? "■" : "🎤"}
+                <i className={recording ? "fa-solid fa-stop" : "fa-solid fa-microphone"}></i>
               </button>
               <input
                 value={draft}
@@ -551,7 +620,7 @@ function ChatApp({ session, onLogout }) {
                 placeholder="Write something…"
                 style={styles.textInput}
               />
-              <button type="submit" style={styles.sendBtn} disabled={!draft.trim()}>➤</button>
+              <button type="submit" style={styles.sendBtn} disabled={!draft.trim()}><i className="fa-solid fa-paper-plane"></i></button>
             </form>
             {connError && (
               <div style={styles.errBanner}>Connection lost — trying to reconnect…</div>
@@ -567,7 +636,7 @@ function ChatApp({ session, onLogout }) {
           <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div style={styles.modalTitle}>Who's signed up</div>
-              <button onClick={() => setShowMembers(false)} style={styles.modalClose}>✕</button>
+              <button onClick={() => setShowMembers(false)} style={styles.modalClose}><i className="fa-solid fa-xmark"></i></button>
             </div>
             {loadingMembers ? (
               <div style={styles.emptyState}>Loading…</div>
@@ -577,9 +646,7 @@ function ChatApp({ session, onLogout }) {
               <div style={styles.membersList}>
                 {members.map((m) => (
                   <div key={m.username} style={styles.memberRow}>
-                    <div style={{ ...styles.msgAvatar, background: hashColor(m.username) }}>
-                      {initials(m.username)}
-                    </div>
+                    <Avatar username={m.username} avatarUrl={m.avatar_url} size={38} fontSize={13} />
                     <div style={{ flex: 1 }}>
                       <div style={styles.memberName}>
                         {m.username}
@@ -590,11 +657,18 @@ function ChatApp({ session, onLogout }) {
                         Joined {new Date(m.created_at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
                       </div>
                     </div>
-                    {isAdmin && (
-                      <button onClick={() => handleResetPassword(m.username)} style={styles.resetBtn}>
-                        Reset password
-                      </button>
-                    )}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                      {m.username !== username && (
+                        <button onClick={() => handleStartDM(m.username)} style={styles.dmBtn}>
+                          <i className="fa-solid fa-message"></i>&nbsp; Message
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button onClick={() => handleResetPassword(m.username)} style={styles.resetBtn}>
+                          Reset password
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -606,6 +680,35 @@ function ChatApp({ session, onLogout }) {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {showProfile && (
+        <div style={styles.modalOverlay} onClick={() => setShowProfile(false)}>
+          <div style={{ ...styles.modalCard, maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalTitle}>Your profile</div>
+              <button onClick={() => setShowProfile(false)} style={styles.modalClose}><i className="fa-solid fa-xmark"></i></button>
+            </div>
+            <div style={styles.profileBody}>
+              <Avatar username={username} avatarUrl={avatarMap[username]} size={88} fontSize={28} />
+              <div style={styles.profileName}>{username}</div>
+              <input
+                type="file"
+                accept="image/*"
+                ref={profilePhotoInputRef}
+                onChange={handleProfilePhotoChange}
+                style={{ display: "none" }}
+              />
+              <button
+                onClick={() => profilePhotoInputRef.current?.click()}
+                style={styles.profileUploadBtn}
+                disabled={profileUploading}
+              >
+                <i className="fa-solid fa-camera"></i>&nbsp; {profileUploading ? "Uploading…" : avatarMap[username] ? "Change photo" : "Add a photo"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -680,6 +783,11 @@ const styles = {
   resetBtn: { fontSize: 11.5, padding: "6px 10px", borderRadius: 8, border: `1px solid ${COLORS.mist}`, background: "#fff", color: COLORS.charcoal, cursor: "pointer", whiteSpace: "nowrap" },
   recoverLinkWrap: { padding: "10px 18px 16px", borderTop: `1px solid ${COLORS.mist}` },
   recoverLink: { border: "none", background: "transparent", color: "#9a9a90", fontSize: 11.5, cursor: "pointer", textDecoration: "underline", padding: 0 },
+  avatarBtn: { border: "none", background: "transparent", padding: 0, cursor: "pointer", borderRadius: "50%" },
+  dmBtn: { fontSize: 11.5, padding: "6px 10px", borderRadius: 8, border: "none", background: COLORS.rose, color: "#fff", cursor: "pointer", whiteSpace: "nowrap" },
+  profileBody: { display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: "28px 20px" },
+  profileName: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 17, color: COLORS.charcoal },
+  profileUploadBtn: { border: `1.5px solid ${COLORS.mist}`, background: "#fff", color: COLORS.charcoal, borderRadius: 10, padding: "10px 16px", fontSize: 13.5, cursor: "pointer", marginTop: 4 },
   onlineBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(251,247,241,0.65)", marginTop: 6 },
   onlineDot: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
   typingIndicator: { padding: "4px 20px", fontSize: 12, color: "#9a9a90", fontStyle: "italic" },

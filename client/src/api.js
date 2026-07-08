@@ -51,6 +51,8 @@ export const api = {
   resetPassword: (username, newPassword) =>
     request(`/api/users/${encodeURIComponent(username)}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
   bootstrapAdmin: (secret) => request('/api/admin/bootstrap', { method: 'POST', body: JSON.stringify({ secret }) }),
+  updateAvatar: (avatarUrl) => request('/api/users/me/avatar', { method: 'POST', body: JSON.stringify({ avatarUrl }) }),
+  startDirectMessage: (username) => request(`/api/dm/${encodeURIComponent(username)}`, { method: 'POST' }),
   uploadFile: async (file) => {
     const token = getToken();
     const formData = new FormData();
