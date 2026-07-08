@@ -53,6 +53,12 @@ export const api = {
   bootstrapAdmin: (secret) => request('/api/admin/bootstrap', { method: 'POST', body: JSON.stringify({ secret }) }),
   updateAvatar: (avatarUrl) => request('/api/users/me/avatar', { method: 'POST', body: JSON.stringify({ avatarUrl }) }),
   startDirectMessage: (username) => request(`/api/dm/${encodeURIComponent(username)}`, { method: 'POST' }),
+  getPosts: () => request('/api/posts'),
+  createPost: (text, mediaUrl, mediaType) =>
+    request('/api/posts', { method: 'POST', body: JSON.stringify({ text, mediaUrl, mediaType }) }),
+  viewPost: (postId) => request(`/api/posts/${postId}/view`, { method: 'POST' }),
+  getPostViewers: (postId) => request(`/api/posts/${postId}/viewers`),
+  reactToPost: (postId, reaction) => request(`/api/posts/${postId}/react`, { method: 'POST', body: JSON.stringify({ reaction }) }),
   uploadFile: async (file) => {
     const token = getToken();
     const formData = new FormData();

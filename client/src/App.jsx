@@ -15,6 +15,7 @@ const COLORS = {
 };
 
 const AVATAR_PALETTE = ["#E0785F", "#7A9E85", "#C4623F", "#5D7A8C", "#B08968", "#8C7A9E"];
+const REACTION_EMOJI = { like: "♥️", dislike: "💔", hate: "😡" };
 
 function hashColor(name) {
   let h = 0;
@@ -48,6 +49,13 @@ function Avatar({ username, avatarUrl, size = 28, fontSize = 11 }) {
 }
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function timeAgo(ts) {
+  const mins = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ago`;
 }
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -212,6 +220,103 @@ function ChatApp({ session, onLogout }) {
     }
   }
 
+  // ---- Live/Status posts ----
+  const [posts, setPosts] = useState([]);
+  const [showComposer, setShowComposer] = useState(false);
+  const [composerText, setComposerText] = useState("");
+  const [composerMedia, setComposerMedia] = useState(null); // { url, type }
+  const [composerUploading, setComposerUploading] = useState(false);
+  const [postSubmitting, setPostSubmitting] = useState(false);
+  const [viewingUsername, setViewingUsername] = useState(null); // whose stack of posts is open
+  const [ownViewers, setOwnViewers] = useState({}); // { [postId]: [{username, viewed_at}] }
+  const postFileInputRef = useRef(null);
+
+  useEffect(() => {
+    api.getPosts().then(setPosts).catch(() => {});
+  }, []);
+
+  const postsByUser = {};
+  for (const p of posts) {
+    if (!postsByUser[p.username]) postsByUser[p.username] = [];
+    postsByUser[p.username].push(p);
+  }
+  const myPosts = postsByUser[username] || [];
+  const hasUnseenFrom = (who) => (postsByUser[who] || []).some((p) => !p.viewed_by_me);
+
+  async function handlePostPhoto(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setComposerUploading(true);
+    try {
+      const { url, attachmentType } = await api.uploadFile(file);
+      setComposerMedia({ url, type: attachmentType });
+    } catch (err) {
+      alert(err.message);
+    }
+    setComposerUploading(false);
+  }
+
+  async function submitPost(e) {
+    e.preventDefault();
+    if (!composerText.trim() && !composerMedia) return;
+    setPostSubmitting(true);
+    try {
+      const post = await api.createPost(composerText.trim(), composerMedia?.url, composerMedia?.type);
+      setPosts((prev) => [...prev, post]);
+      setShowComposer(false);
+      setComposerText("");
+      setComposerMedia(null);
+    } catch (err) {
+      alert(err.message);
+    }
+    setPostSubmitting(false);
+  }
+
+  async function openStatus(who) {
+    setViewingUsername(who);
+    if (who === username) {
+      const viewers = {};
+      for (const p of myPosts) {
+        try {
+          viewers[p.id] = await api.getPostViewers(p.id);
+        } catch {
+          viewers[p.id] = [];
+        }
+      }
+      setOwnViewers(viewers);
+    } else {
+      const unseen = (postsByUser[who] || []).filter((p) => !p.viewed_by_me);
+      for (const p of unseen) {
+        api.viewPost(p.id).catch(() => {});
+      }
+      if (unseen.length) {
+        const unseenIds = new Set(unseen.map((p) => p.id));
+        setPosts((prev) => prev.map((p) => (unseenIds.has(p.id) ? { ...p, viewed_by_me: true } : p)));
+      }
+    }
+  }
+
+  async function handleReact(post, reaction) {
+    const newReaction = post.my_reaction === reaction ? null : reaction;
+    // optimistic update
+    setPosts((prev) =>
+      prev.map((p) => {
+        if (p.id !== post.id) return p;
+        const next = { ...p, my_reaction: newReaction };
+        if (post.my_reaction) next[`${post.my_reaction}_count`] = Math.max(0, (next[`${post.my_reaction}_count`] || 0) - 1);
+        if (newReaction) next[`${newReaction}_count`] = (next[`${newReaction}_count`] || 0) + 1;
+        return next;
+      })
+    );
+    try {
+      await api.reactToPost(post.id, newReaction);
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+
   async function handleResetPassword(targetUsername) {
     const newPassword = window.prompt(`New password for ${targetUsername} (at least 6 characters):`);
     if (!newPassword) return;
@@ -265,6 +370,16 @@ function ChatApp({ session, onLogout }) {
     });
 
     socket.on("presence", (names) => setOnlineUsers(names));
+
+    socket.on("new_post", (post) => {
+      setPosts((prev) => (prev.some((p) => p.id === post.id) ? prev : [...prev, { ...post, viewed_by_me: post.username === username }]));
+    });
+
+    socket.on("post_reaction", ({ postId, like_count, dislike_count, hate_count }) => {
+      setPosts((prev) =>
+        prev.map((p) => (p.id === postId ? { ...p, like_count, dislike_count, hate_count } : p))
+      );
+    });
 
     socket.on("typing", ({ roomId, username: who }) => {
       if (roomId !== activeRoomRef.current || who === username) return;
@@ -473,6 +588,37 @@ function ChatApp({ session, onLogout }) {
             <button onClick={openMembers} style={styles.membersBtn}>Members</button>
             <button onClick={onLogout} style={styles.logoutBtn}>Log out</button>
           </div>
+        </div>
+
+        <div style={styles.statusStrip}>
+          <button
+            onClick={() => (myPosts.length ? openStatus(username) : setShowComposer(true))}
+            style={styles.statusItem}
+          >
+            <div style={styles.statusRingWrap}>
+              <div style={{ ...styles.statusRing, borderColor: myPosts.length ? COLORS.rose : "transparent" }}>
+                <Avatar username={username} avatarUrl={avatarMap[username]} size={48} fontSize={16} />
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowComposer(true); }}
+                style={styles.statusAddBadge}
+                title="Add a status"
+              >
+                <i className="fa-solid fa-plus"></i>
+              </button>
+            </div>
+            <span style={styles.statusLabel}>Your status</span>
+          </button>
+          {Object.keys(postsByUser)
+            .filter((who) => who !== username)
+            .map((who) => (
+              <button key={who} onClick={() => openStatus(who)} style={styles.statusItem}>
+                <div style={{ ...styles.statusRing, borderColor: hasUnseenFrom(who) ? COLORS.rose : COLORS.mist }}>
+                  <Avatar username={who} avatarUrl={avatarMap[who]} size={48} fontSize={16} />
+                </div>
+                <span style={styles.statusLabel}>{who}</span>
+              </button>
+            ))}
         </div>
 
         <div style={styles.roomListWrap}>
@@ -713,6 +859,114 @@ function ChatApp({ session, onLogout }) {
         </div>
       )}
 
+      {showComposer && (
+        <div style={styles.modalOverlay} onClick={() => setShowComposer(false)}>
+          <div style={{ ...styles.modalCard, maxWidth: 360 }} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalTitle}>Share a status</div>
+              <button onClick={() => setShowComposer(false)} style={styles.modalClose}><i className="fa-solid fa-xmark"></i></button>
+            </div>
+            <form onSubmit={submitPost} style={styles.composerBody}>
+              <textarea
+                value={composerText}
+                onChange={(e) => setComposerText(e.target.value)}
+                placeholder="What's happening?"
+                style={styles.composerTextarea}
+                rows={3}
+              />
+              <input
+                type="file"
+                accept="image/*,video/*"
+                ref={postFileInputRef}
+                onChange={handlePostPhoto}
+                style={{ display: "none" }}
+              />
+              {composerMedia ? (
+                composerMedia.type === "video" ? (
+                  <video src={composerMedia.url} controls style={styles.composerPreview} />
+                ) : (
+                  <img src={composerMedia.url} alt="preview" style={styles.composerPreview} />
+                )
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => postFileInputRef.current?.click()}
+                  style={styles.profileUploadBtn}
+                  disabled={composerUploading}
+                >
+                  <i className="fa-solid fa-camera"></i>&nbsp; {composerUploading ? "Uploading…" : "Attach a photo or video"}
+                </button>
+              )}
+              <button
+                type="submit"
+                style={styles.joinBtn}
+                disabled={postSubmitting || composerUploading || (!composerText.trim() && !composerMedia)}
+              >
+                {postSubmitting ? "Sharing…" : "Share"}
+              </button>
+              <p style={styles.postNote}>Visible to everyone for 24 hours, then it disappears automatically.</p>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {viewingUsername && (
+        <div style={styles.modalOverlay} onClick={() => setViewingUsername(null)}>
+          <div style={{ ...styles.modalCard, maxWidth: 380 }} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Avatar username={viewingUsername} avatarUrl={avatarMap[viewingUsername]} size={30} fontSize={12} />
+                <div style={styles.modalTitle}>{viewingUsername === username ? "Your status" : viewingUsername}</div>
+              </div>
+              <button onClick={() => setViewingUsername(null)} style={styles.modalClose}><i className="fa-solid fa-xmark"></i></button>
+            </div>
+            <div style={styles.statusViewerList}>
+              {(postsByUser[viewingUsername] || []).map((p) => (
+                <div key={p.id} style={styles.statusPost}>
+                  <div style={styles.statusPostMeta}>{timeAgo(p.created_at)}</div>
+                  {p.media_type === "video" ? (
+                    <video src={p.media_url} controls style={styles.statusPostMedia} />
+                  ) : p.media_type === "image" ? (
+                    <img src={p.media_url} alt="status" style={styles.statusPostMedia} />
+                  ) : null}
+                  {p.text && <div style={styles.statusPostText}>{p.text}</div>}
+                  {viewingUsername === username ? (
+                    <div style={styles.statusSeenBy}>
+                      {ownViewers[p.id]?.length
+                        ? ownViewers[p.id]
+                            .map((v) => `${v.username}${v.reaction ? ` ${REACTION_EMOJI[v.reaction]}` : ""}`)
+                            .join(", ")
+                        : "No one has seen this yet"}
+                    </div>
+                  ) : (
+                    <div style={styles.reactionRow}>
+                      <button
+                        onClick={() => handleReact(p, "like")}
+                        style={{ ...styles.reactionBtn, ...(p.my_reaction === "like" ? styles.reactionBtnActive : {}) }}
+                      >
+                        ♥️ {p.like_count || 0}
+                      </button>
+                      <button
+                        onClick={() => handleReact(p, "dislike")}
+                        style={{ ...styles.reactionBtn, ...(p.my_reaction === "dislike" ? styles.reactionBtnActive : {}) }}
+                      >
+                        💔 {p.dislike_count || 0}
+                      </button>
+                      <button
+                        onClick={() => handleReact(p, "hate")}
+                        style={{ ...styles.reactionBtn, ...(p.my_reaction === "hate" ? styles.reactionBtnActive : {}) }}
+                      >
+                        😡 {p.hate_count || 0}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @media (min-width: 760px) {
           .fc-sidebar { display: flex !important; }
@@ -788,6 +1042,25 @@ const styles = {
   profileBody: { display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: "28px 20px" },
   profileName: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 17, color: COLORS.charcoal },
   profileUploadBtn: { border: `1.5px solid ${COLORS.mist}`, background: "#fff", color: COLORS.charcoal, borderRadius: 10, padding: "10px 16px", fontSize: 13.5, cursor: "pointer", marginTop: 4 },
+  statusStrip: { display: "flex", gap: 14, overflowX: "auto", padding: "14px 16px", borderBottom: `1px solid rgba(255,255,255,0.08)` },
+  statusItem: { display: "flex", flexDirection: "column", alignItems: "center", gap: 5, border: "none", background: "transparent", cursor: "pointer", flexShrink: 0, width: 60 },
+  statusRingWrap: { position: "relative" },
+  statusRing: { width: 54, height: 54, borderRadius: "50%", border: "2.5px solid", display: "flex", alignItems: "center", justifyContent: "center" },
+  statusAddBadge: { position: "absolute", bottom: -2, right: -2, width: 20, height: 20, borderRadius: "50%", background: COLORS.rose, color: "#fff", border: `2px solid ${COLORS.ink}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, cursor: "pointer" },
+  statusLabel: { fontSize: 10.5, color: "rgba(251,247,241,0.75)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 60 },
+  composerBody: { display: "flex", flexDirection: "column", gap: 12, padding: "18px" },
+  composerTextarea: { width: "100%", padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${COLORS.mist}`, fontSize: 14.5, fontFamily: "'Inter', sans-serif", outline: "none", resize: "vertical" },
+  composerPreview: { width: "100%", maxHeight: 220, borderRadius: 12, objectFit: "cover" },
+  postNote: { fontSize: 11.5, color: "#9a9a90", textAlign: "center", margin: 0 },
+  statusViewerList: { overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 18 },
+  statusPost: { display: "flex", flexDirection: "column", gap: 8 },
+  statusPostMeta: { fontSize: 11.5, color: "#9a9a90" },
+  statusPostMedia: { width: "100%", maxHeight: 320, borderRadius: 12, objectFit: "cover" },
+  statusPostText: { fontSize: 15, color: COLORS.charcoal, lineHeight: 1.5 },
+  statusSeenBy: { fontSize: 11.5, color: COLORS.sage, fontStyle: "italic" },
+  reactionRow: { display: "flex", gap: 8 },
+  reactionBtn: { display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${COLORS.mist}`, background: "#fff", borderRadius: 20, padding: "6px 12px", fontSize: 13, cursor: "pointer", color: COLORS.charcoal },
+  reactionBtnActive: { background: COLORS.cream, borderColor: COLORS.rose },
   onlineBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(251,247,241,0.65)", marginTop: 6 },
   onlineDot: { width: 7, height: 7, borderRadius: "50%", background: COLORS.sage, display: "inline-block" },
   typingIndicator: { padding: "4px 20px", fontSize: 12, color: "#9a9a90", fontStyle: "italic" },
